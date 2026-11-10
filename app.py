@@ -7,7 +7,11 @@ from electrolab.calculations import current_density
 from electrolab.simulation import ElectroplatingSimulator
 from electrolab.experiment import ChargeIntegrator
 from electrolab.charts import make_time_series_chart
-from electrolab.storage import measurements_to_csv
+from electrolab.storage import (
+    measurements_to_csv,
+    create_experiment_log,
+    append_measurement,
+)
 
 
 # --------------------------------------------------
@@ -43,6 +47,14 @@ if "history" not in st.session_state:
 if "previous_mode" not in st.session_state:
     st.session_state.previous_mode = "Simulation Mode"
 
+if "log_path" not in st.session_state:
+    st.session_state.log_path = None
+
+if "log_error" not in st.session_state:
+    st.session_state.log_error = None
+
+if "stopped" not in st.session_state:
+    st.session_state.stopped = False
 
 def reset_experiment():
     """Reset simulation and measurement history."""
@@ -51,6 +63,9 @@ def reset_experiment():
     st.session_state.latest_sample = None
     st.session_state.history = []
     st.session_state.running = False
+    st.session_state.log_path = None
+    st.session_state.log_error = None
+    st.session_state.stopped = False
 
 
 # --------------------------------------------------
