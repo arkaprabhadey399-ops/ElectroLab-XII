@@ -3,16 +3,23 @@ import pandas as pd
 import streamlit as st
 
 
-from electrolab.calculations import current_density
+from electrolab.calculations import (
+    current_density,
+    actual_mass_gain,
+    current_efficiency,
+)
 from electrolab.simulation import ElectroplatingSimulator
 from electrolab.experiment import ChargeIntegrator
-from electrolab.charts import make_time_series_chart
+from electrolab.charts import (
+    make_time_series_chart,
+    make_deposition_comparison_chart,
+)
 from electrolab.storage import (
     measurements_to_csv,
     create_experiment_log,
     append_measurement,
 )
-
+from electrolab.reports import generate_experiment_report
 
 # --------------------------------------------------
 # PAGE CONFIGURATION
@@ -66,6 +73,8 @@ def reset_experiment():
     st.session_state.log_path = None
     st.session_state.log_error = None
     st.session_state.stopped = False
+    st.session_state.pop("initial_mass_g", None)
+    st.session_state.pop("final_mass_g", None)
 
 
 # --------------------------------------------------
@@ -79,6 +88,35 @@ st.caption(
 )
 
 st.divider()
+
+def start_or_resume():
+    """Start or resume the software experiment."""
+
+    if st.session_state.running or st.session_state.stopped:
+        return
+
+    if st.session_state.log_path is None:
+        try:
+            st.session_state.log_path = create_experiment_log()
+        except OSError as exc:
+            st.session_state.log_error = str(exc)
+            return
+
+    st.session_state.log_error = None
+    st.session_state.integrator.start()
+    st.session_state.running = True
+
+
+def pause_experiment():
+    """Pause the software session."""
+    st.session_state.integrator.pause()
+    st.session_state.running = False
+
+
+def stop_experiment():
+    """Finalize the software session."""
+    pause_experiment()
+    st.session_state.stopped = True
 
 
 # --------------------------------------------------
@@ -106,7 +144,35 @@ with st.sidebar:
         step=0.5,
         format="%.2f",
     )
+    st.divider()
+    st.subheader("Cathode Mass Measurements")
 
+    initial_mass_g = st.number_input(
+        "Initial Cathode Mass (g)",
+        min_value=0.0,
+        value=None,
+        step=0.001,
+        format="%.3f",
+        placeholder="Enter initial mass",
+        key="initial_mass_g",
+    )
+
+    final_mass_g = st.number_input(
+        "Final Cathode Mass (g)",
+        min_value=0.0,
+        value=None,
+        step=0.001,
+        format="%.3f",
+        placeholder="Enter final mass",
+        key="final_mass_g",
+        disabled=not st.session_state.stopped,
+    )
+
+    st.caption(
+        "Measure the initial mass before plating. "
+        "Enter the final mass after stopping the experiment, "
+        "rinsing and thoroughly drying the cathode."
+    )
     st.selectbox(
     "Graph Category",
     [
@@ -126,50 +192,41 @@ with st.sidebar:
 
     
     # START / RESUME
-    if st.button(
+    
+    st.button(
         "▶ Start / Resume",
+        on_click=start_or_resume,
         disabled=(
             mode != "Simulation Mode"
             or st.session_state.running
             or st.session_state.stopped
         ),
-    ):
-        # Create a CSV file for a new experiment.
-        if st.session_state.log_path is None:
-            try:
-                st.session_state.log_path = create_experiment_log()
-            except OSError as exc:
-                st.session_state.log_error = str(exc)
+        use_container_width=True,
+    )
 
-        # Start only if the log file exists.
-        if st.session_state.log_path is not None:
-            st.session_state.log_error = None
-            st.session_state.integrator.start()
-            st.session_state.running = True
-
-    # PAUSE
-    if st.button(
+    st.button(
         "⏸ Pause",
+        on_click=pause_experiment,
         disabled=not st.session_state.running,
-    ):
-        st.session_state.integrator.pause()
-        st.session_state.running = False
+        use_container_width=True,
+    )
 
-    # STOP
-    if st.button(
+    st.button(
         "⏹ Stop Experiment",
+        on_click=stop_experiment,
         disabled=(
             st.session_state.stopped
             or not st.session_state.history
         ),
-    ):
-        st.session_state.integrator.pause()
-        st.session_state.running = False
-        st.session_state.stopped = True
+        use_container_width=True,
+    )
 
-    # RESET
-    if st.button("↺ Reset Experiment"):
-        reset_experiment()
+    st.button(
+        "↺ Reset Experiment",
+        on_click=reset_experiment,
+        use_container_width=True,
+    )
+
 
 
     st.divider()
@@ -260,7 +317,7 @@ def live_dashboard():
         )
 
     if sample is None:
-        st.info("Press Start / Resume to begin simulation.")
+        st.info("No measurements yet. Press Start / Resume.")
         return
 
     # --------------------------------------------------
@@ -324,6 +381,77 @@ def live_dashboard():
 
 
     st.divider()
+    st.subheader("Experimental Deposition Analysis")
+
+    if not st.session_state.stopped:
+        st.info(
+            "Stop the experiment and enter the final "
+            "cathode mass to calculate current efficiency."
+        )
+
+    elif initial_mass_g is None or final_mass_g is None:
+        st.info(
+            "Enter both initial and final cathode masses "
+            "to compare actual and theoretical deposition."
+        )
+
+    elif integrator.total_charge_c <= 0:
+        st.warning(
+            "Current efficiency cannot be calculated "
+            "without positive accumulated charge."
+        )
+
+    else:
+        actual_gain_g = actual_mass_gain(
+            initial_mass_g,
+            final_mass_g,
+        )
+
+        theoretical_gain_g = integrator.theoretical_mass_g
+
+        if actual_gain_g < 0:
+            st.warning(
+                "The cathode has lost mass. This result "
+                "cannot be interpreted as normal copper "
+                "deposition efficiency."
+            )
+
+        else:
+            efficiency_pct = current_efficiency(
+                actual_gain_g,
+                theoretical_gain_g,
+            )
+
+            col1, col2, col3 = st.columns(3)
+
+            col1.metric(
+                "Actual Mass Gain",
+                f"{actual_gain_g * 1000:.3f} mg",
+            )
+
+            col2.metric(
+                "Theoretical Mass Gain",
+                f"{theoretical_gain_g * 1000:.3f} mg",
+            )
+
+            col3.metric(
+                "Apparent Current Efficiency",
+                f"{efficiency_pct:.2f}%",
+            )
+
+            if efficiency_pct > 100:
+                st.warning(
+                    "Efficiency exceeds 100%. Check "
+                    "mass measurements, drying, and "
+                    "current measurement accuracy."
+                )
+
+            if mode == "Simulation Mode":
+                st.caption(
+                    "Illustrative comparison: theoretical "
+                    "mass is calculated from simulated charge. "
+                    "Mass values are manually entered."
+                )
 
     # --------------------------------------------------
     # MEASUREMENT HISTORY
@@ -378,6 +506,38 @@ def live_dashboard():
         "All values are synthetic."
     )
 
+    # Sixth graph: final measured/entered mass comparison.
+    if (
+        st.session_state["graph_view"] == "Copper Deposition"
+        and st.session_state.stopped
+        and initial_mass_g is not None
+        and final_mass_g is not None
+        and integrator.total_charge_c > 0
+    ):
+        actual_gain_g = actual_mass_gain(
+            initial_mass_g,
+            final_mass_g,
+        )
+
+        if actual_gain_g >= 0:
+            comparison_fig = make_deposition_comparison_chart(
+                theoretical_mg=integrator.theoretical_mass_mg,
+                actual_mg=actual_gain_g * 1000,
+            )
+
+            st.plotly_chart(
+                comparison_fig,
+                width="stretch",
+                key="deposition_comparison",
+            )
+
+            if mode == "Simulation Mode":
+                st.caption(
+                    "Illustrative comparison based on simulated "
+                    "charge and manually entered mass values."
+                )
+
+
     
     st.divider()
     st.subheader("Data Export")
@@ -403,8 +563,41 @@ def live_dashboard():
         st.info("No measurements have been recorded yet.")
 
 
+    st.divider()
+    st.subheader("Scientific Experiment Report")
+
+    if st.session_state.stopped and st.session_state.history:
+
+        try:
+            report_text = generate_experiment_report(
+                history=st.session_state.history,
+                experiment_name=experiment_name,
+                area_cm2=exposed_area_cm2,
+                initial_mass_g=initial_mass_g,
+                final_mass_g=final_mass_g,
+            )
+
+            st.download_button(
+                label="⬇ Download Experiment Report",
+                data=report_text,
+                file_name="ElectroLab_X_Report.txt",
+                mime="text/plain",
+                on_click="ignore",
+                key="download_report",
+            )
+
+        except ValueError as exc:
+            st.error(f"Report generation failed: {exc}")
+
+    else:
+        st.info(
+            "Stop the experiment to generate its final report."
+        )
+
 
 live_dashboard()
+
+
 
 
 

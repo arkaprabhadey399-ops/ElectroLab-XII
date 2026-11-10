@@ -1,9 +1,14 @@
+
 import pandas as pd
-import plotly.graph_objects as go
 import pytest
 import numpy as np
-from plotly.graph_objs import Scatter
-from electrolab.charts import make_time_series_chart
+
+from plotly.graph_objs import Scatter, Bar
+
+from electrolab.charts import (
+    make_time_series_chart,
+    make_deposition_comparison_chart,
+)
 
 
 def test_current_chart():
@@ -53,6 +58,32 @@ def test_invalid_chart_column():
             title="Current",
             y_label="Current (mA)",
         )
+
+
+def test_deposition_comparison_chart():
+    fig = make_deposition_comparison_chart(
+        theoretical_mg=2.5,
+        actual_mg=2.0,
+    )
+
+    trace = next(fig.select_traces())
+
+    assert isinstance(trace, Bar)
+    assert list(trace.x) == ["Theoretical", "Actual"]
+
+    np.testing.assert_allclose(
+        np.asarray(trace.y, dtype=float),
+        [2.5, 2.0],
+    )
+
+
+def test_invalid_deposition_comparison():
+    with pytest.raises(ValueError):
+        make_deposition_comparison_chart(
+            theoretical_mg=0.0,
+            actual_mg=1.0,
+        )
+
 
 
 
