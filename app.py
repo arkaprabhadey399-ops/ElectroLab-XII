@@ -124,16 +124,30 @@ with st.sidebar:
 
     st.divider()
 
+    
+    # START / RESUME
     if st.button(
         "▶ Start / Resume",
         disabled=(
             mode != "Simulation Mode"
             or st.session_state.running
+            or st.session_state.stopped
         ),
     ):
-        st.session_state.integrator.start()
-        st.session_state.running = True
+        # Create a CSV file for a new experiment.
+        if st.session_state.log_path is None:
+            try:
+                st.session_state.log_path = create_experiment_log()
+            except OSError as exc:
+                st.session_state.log_error = str(exc)
 
+        # Start only if the log file exists.
+        if st.session_state.log_path is not None:
+            st.session_state.log_error = None
+            st.session_state.integrator.start()
+            st.session_state.running = True
+
+    # PAUSE
     if st.button(
         "⏸ Pause",
         disabled=not st.session_state.running,
@@ -141,8 +155,22 @@ with st.sidebar:
         st.session_state.integrator.pause()
         st.session_state.running = False
 
+    # STOP
+    if st.button(
+        "⏹ Stop Experiment",
+        disabled=(
+            st.session_state.stopped
+            or not st.session_state.history
+        ),
+    ):
+        st.session_state.integrator.pause()
+        st.session_state.running = False
+        st.session_state.stopped = True
+
+    # RESET
     if st.button("↺ Reset Experiment"):
         reset_experiment()
+
 
     st.divider()
     st.caption("ElectroLab X | Version 0.3")
@@ -181,20 +209,36 @@ def live_dashboard():
 
         st.session_state.latest_sample = sample
 
-        # Store the measurement
-        st.session_state.history.append(
-            {
-                "time_s": sample.timestamp_s,
-                "voltage_v": sample.voltage_v,
-                "current_ma": sample.current_a * 1000,
-                "power_w": sample.power_w,
-                "charge_c": charge,
-                "copper_mg": (
-                    st.session_state.integrator.theoretical_mass_mg
-                ),
-                "source": sample.source,
-            }
-        )
+                # Create a measurement record.
+        measurement = {
+            "time_s": sample.timestamp_s,
+            "voltage_v": sample.voltage_v,
+            "current_ma": sample.current_a * 1000,
+            "power_w": sample.power_w,
+            "charge_c": charge,
+            "copper_mg": st.session_state.integrator.theoretical_mass_mg
+                if False else st.session_state.integrator.theoretical_mass_mg,
+            "source": sample.source,
+        }
+
+        # Preserve the measurement in memory.
+        st.session_state.history.append(measurement)
+
+        # Save the measurement to disk.
+        try:
+            if st.session_state.log_path is None:
+                raise OSError("No active experiment log.")
+
+            append_measurement(
+                st.session_state.log_path,
+                measurement,
+            )
+
+        except (OSError, ValueError) as exc:
+            st.session_state.log_error = str(exc)
+            st.session_state.integrator.pause()
+            st.session_state.running = False
+            st.session_state.stopped = True
 
     sample = st.session_state.latest_sample
     integrator = st.session_state.integrator
@@ -203,6 +247,17 @@ def live_dashboard():
         st.success("● SIMULATION RUNNING")
     else:
         st.info("● SIMULATION PAUSED / NOT STARTED")
+    if st.session_state.log_path is not None:
+        st.caption(
+            "Automatic logging: "
+            f"{st.session_state.log_path.name}"
+        )
+
+    if st.session_state.log_error:
+        st.error(
+            "Logging error: "
+            f"{st.session_state.log_error}"
+        )
 
     if sample is None:
         st.info("Press Start / Resume to begin simulation.")
