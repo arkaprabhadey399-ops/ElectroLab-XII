@@ -3,6 +3,10 @@ import pandas as pd
 import streamlit as st
 
 
+from electrolab.acquisition import NanoAcquisition
+from electrolab.mock_bridge import ArduinoMockBridge
+
+
 from electrolab.calculations import (
     current_density,
     actual_mass_gain,
@@ -63,7 +67,31 @@ if "log_error" not in st.session_state:
 if "stopped" not in st.session_state:
     st.session_state.stopped = False
 
+if "mock_bridge" not in st.session_state:
+    st.session_state.mock_bridge = ArduinoMockBridge()
+
+if "nano_acquisition" not in st.session_state:
+    st.session_state.nano_acquisition = None
+
+
+def release_nano_acquisition():
+    """Stop Arduino acquisition and release the serial port."""
+
+    acquisition = st.session_state.nano_acquisition
+
+    if acquisition is not None:
+        acquisition.stop()
+        st.session_state.nano_acquisition = None
+
+
 def reset_experiment():
+
+    # Stop any active Arduino communication.
+    release_nano_acquisition()
+
+    # Reset Arduino scientific processing.
+    st.session_state.mock_bridge.reset()
+
     """Reset simulation and measurement history."""
     st.session_state.simulator = ElectroplatingSimulator()
     st.session_state.integrator = ChargeIntegrator()
@@ -89,12 +117,35 @@ st.caption(
 
 st.divider()
 
+
 def start_or_resume():
-    """Start or resume the software experiment."""
+    """Start or resume the selected experiment mode."""
 
     if st.session_state.running or st.session_state.stopped:
         return
 
+    selected_mode = st.session_state.measurement_mode
+
+    port: str = ""
+
+
+    # Physical sensor integration is not yet verified.
+    if selected_mode == "Live Arduino Mode":
+        st.session_state.log_error = (
+            "Live INA219 mode is not enabled."
+        )
+        return
+
+    if selected_mode == "Arduino Mock Mode":
+        port = st.session_state.serial_port.strip()
+
+        if not port:
+            st.session_state.log_error = (
+                "Enter a valid Arduino COM port."
+            )
+            return
+
+    # Create an experiment log if this is a new session.
     if st.session_state.log_path is None:
         try:
             st.session_state.log_path = create_experiment_log()
@@ -103,20 +154,54 @@ def start_or_resume():
             return
 
     st.session_state.log_error = None
-    st.session_state.integrator.start()
+
+    if selected_mode == "Simulation Mode":
+        st.session_state.integrator.start()
+
+    elif selected_mode == "Arduino Mock Mode":
+        st.session_state.mock_bridge.resume()
+
+        acquisition = NanoAcquisition(
+            port=port, 
+        )
+
+        try:
+            acquisition.start()
+        except RuntimeError as exc:
+            st.session_state.mock_bridge.pause()
+            st.session_state.log_error = str(exc)
+            return
+
+        st.session_state.nano_acquisition = acquisition
+
     st.session_state.running = True
 
 
+
+
 def pause_experiment():
-    """Pause the software session."""
-    st.session_state.integrator.pause()
+    """Pause the active software measurement session."""
+
+    selected_mode = st.session_state.measurement_mode
+
+    if selected_mode == "Simulation Mode":
+        st.session_state.integrator.pause()
+
+    elif selected_mode == "Arduino Mock Mode":
+        release_nano_acquisition()
+        st.session_state.mock_bridge.pause()
+
     st.session_state.running = False
 
 
+
+
 def stop_experiment():
-    """Finalize the software session."""
+    """Finalize the current software experiment."""
+
     pause_experiment()
     st.session_state.stopped = True
+
 
 
 # --------------------------------------------------
@@ -134,9 +219,36 @@ with st.sidebar:
 
     mode = st.selectbox(
         "Measurement Mode",
-        ["Simulation Mode", "Live Arduino Mode"],
+        [
+            "Simulation Mode",
+            "Arduino Mock Mode",
+            "Live Arduino Mode",
+        ],
+        key="measurement_mode",
+        disabled=(
+            st.session_state.running
+            or bool(st.session_state.history)
+        ),
     )
-    
+
+    serial_port = st.text_input(
+        "Arduino Serial Port",
+        value="COM3",
+        disabled=mode != "Arduino Mock Mode",
+        help="Example: COM3. Check Device Manager for your Nano's port.",
+        key="serial_port",
+    )
+
+    if mode == "Arduino Mock Mode":
+        st.caption(
+            "Arduino-generated synthetic measurements. "
+            "No physical sensor readings."
+        )
+
+    elif mode == "Live Arduino Mode":
+        st.warning(
+            "Live INA219 mode is not yet verified or enabled."  
+        )
     exposed_area_cm2 = st.number_input(
         "Exposed Cathode Surface Area (cm²)",
         min_value=0.1,
@@ -196,11 +308,13 @@ with st.sidebar:
     st.button(
         "▶ Start / Resume",
         on_click=start_or_resume,
+        
         disabled=(
-            mode != "Simulation Mode"
+            mode == "Live Arduino Mode"
             or st.session_state.running
             or st.session_state.stopped
         ),
+
         use_container_width=True,
     )
 

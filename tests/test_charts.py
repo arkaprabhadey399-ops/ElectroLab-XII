@@ -68,8 +68,16 @@ def test_deposition_comparison_chart():
 
     trace = next(fig.select_traces())
 
+    
     assert isinstance(trace, Bar)
-    assert list(trace.x) == ["Theoretical", "Actual"]
+
+    # Confirm that the graph has X-axis data.
+    x_values = trace.x
+    assert x_values is not None
+
+    # Verify the labels.
+    assert list(x_values) == ["Theoretical", "Actual"]
+
 
     np.testing.assert_allclose(
         np.asarray(trace.y, dtype=float),

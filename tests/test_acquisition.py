@@ -1,4 +1,5 @@
 
+import pytest
 from electrolab.acquisition import NanoAcquisition
 from electrolab.serial_reader import SerialEvent
 
@@ -32,6 +33,10 @@ def test_background_acquisition():
     acquisition = NanoAcquisition(reader=fake)
 
     acquisition.start()
+
+# Verify that the acquisition thread was created.
+    assert acquisition._thread is not None
+
     acquisition._thread.join(timeout=2.0)
 
     events = acquisition.get_pending_events()
@@ -60,4 +65,38 @@ def test_invalid_queue_limit():
         pass
     else:
         raise AssertionError("Expected ValueError")
+
+
+def test_invalid_queue_capacity():
+    with pytest.raises(ValueError):
+        NanoAcquisition(
+            reader=FakeReader(),
+            max_queue_size=0,
+        )
+
+
+def test_queue_overflow_is_reported():
+    fake = FakeReader()
+
+    # Supply enough events to overflow a two-event queue.
+    fake.events = iter([
+        SerialEvent(status="timeout")
+        for _ in range(5)
+    ])
+
+    acquisition = NanoAcquisition(
+        reader=fake,
+        max_queue_size=2,
+    )
+
+    acquisition.start()
+    assert acquisition._thread is not None
+    acquisition._thread.join(timeout=2.0)
+
+    events = acquisition.get_pending_events()
+
+    assert len(events) == 1
+    assert events[0].status == "overflow"
+    assert acquisition.is_running is False
+    assert fake.closed is True
 
