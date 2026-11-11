@@ -37,10 +37,10 @@ class NanoAcquisition:
             else NanoSerialReader(
                 port=port,
                 baudrate=115200,
-                timeout_s=0.5,
+                timeout_s=1.5,
             )
-        )    
-        
+        )
+
 
         if max_queue_size <= 0:
             raise ValueError("Queue capacity must be positive.")

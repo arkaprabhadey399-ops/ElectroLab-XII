@@ -5,7 +5,7 @@ import streamlit as st
 
 from electrolab.acquisition import NanoAcquisition
 from electrolab.mock_bridge import ArduinoMockBridge
-
+from electrolab.simulation import SimulatedMeasurement
 
 from electrolab.calculations import (
     current_density,
@@ -154,6 +154,7 @@ def start_or_resume():
             return
 
     st.session_state.log_error = None
+    st.session_state.nano_timeout_count = 0
 
     if selected_mode == "Simulation Mode":
         st.session_state.integrator.start()
@@ -347,31 +348,161 @@ with st.sidebar:
     st.caption("ElectroLab X | Version 0.3")
 
 
+
+
+def consume_arduino_events():
+    """Process validated Arduino mock measurements."""
+
+    acquisition = st.session_state.nano_acquisition
+
+    if acquisition is None:
+        return
+
+    events = acquisition.get_pending_events(limit=100)
+
+    for event in events:
+
+
+        error_message = None
+
+        # -----------------------------------------
+        # HANDLE SERIAL TIMEOUTS
+        # -----------------------------------------
+
+        if event.status == "timeout":
+
+            # Break charge integration continuity.
+            st.session_state.mock_bridge.consume(event)
+
+            count = (
+                st.session_state.get("nano_timeout_count", 0)
+                + 1
+            )
+
+            st.session_state.nano_timeout_count = count
+
+            
+
+            if count < 5:
+                continue
+
+            error_message = (
+                "Arduino acquisition stopped: "
+                "five consecutive serial timeouts."
+            )
+
+        # -----------------------------------------
+        # HANDLE OTHER ERRORS
+        # -----------------------------------------
+
+        elif event.status != "sample":
+
+            st.session_state.mock_bridge.consume(event)
+
+            error_message = (
+                "Arduino acquisition stopped: "
+                f"{event.status} — {event.message}"
+            )
+
+        # -----------------------------------------
+        # PROCESS VALID MEASUREMENT
+        # -----------------------------------------
+
+        else:
+
+            st.session_state.nano_timeout_count = 0
+
+            record = st.session_state.mock_bridge.consume(event)
+
+            if record is None:
+                continue
+
+            sample = SimulatedMeasurement(
+                timestamp_s=record["time_s"],
+                voltage_v=record["voltage_v"],
+                current_a=record["current_ma"] / 1000.0,
+                source="ARDUINO_MOCK",
+            )
+
+            try:
+                if st.session_state.log_path is None:
+                    raise OSError("No active experiment log.")
+
+                append_measurement(
+                    st.session_state.log_path,
+                    record,
+                )
+
+            except (OSError, ValueError) as exc:
+                error_message = (
+                    f"Arduino logging failed: {exc}"
+                )
+
+            else:
+                st.session_state.history.append(record)
+                st.session_state.latest_sample = sample
+
+                continue
+
+        # -----------------------------------------
+        # STOP SAFELY AFTER A FATAL ERROR
+        # -----------------------------------------
+
+        if error_message is not None:
+
+            st.session_state.log_error = error_message
+
+            release_nano_acquisition()
+
+            st.session_state.mock_bridge.pause()
+
+            st.session_state.running = False
+            st.session_state.stopped = True
+
+            st.rerun()
+
+
 # --------------------------------------------------
 # LIVE DASHBOARD
 # --------------------------------------------------
 
+
 refresh_interval = (
     "500ms"
-    if mode == "Simulation Mode" and st.session_state.running
+    if (
+        st.session_state.running
+        and mode in ("Simulation Mode", "Arduino Mock Mode")
+    )
     else None
 )
-
 
 @st.fragment(run_every=refresh_interval)
 def live_dashboard():
 
-    if mode != "Simulation Mode":
+    # Live sensor measurements remain disabled.
+    if mode == "Live Arduino Mode":
         st.warning(
-            "Live Arduino acquisition is not available yet. "
-            "Hardware integration requires electrical verification."
+            "Live INA219 measurements are not enabled. "
+            "Electrical verification is required."
         )
         return
 
-    # Generate one measurement while running
-    if st.session_state.running:
+    # Process Arduino mock measurements received over USB.
+    if mode == "Arduino Mock Mode" and st.session_state.running:
+        consume_arduino_events()
+    
+    if mode == "Arduino Mock Mode" and st.session_state.log_error:
+        st.error(
+            f"Arduino connection error: "
+            f"{st.session_state.log_error}"
+        )
+
+
+    # Generate Python simulation measurements only in Simulation Mode.
+    if mode == "Simulation Mode" and st.session_state.running:
 
         sample = st.session_state.simulator.next_measurement()
+
 
         charge = st.session_state.integrator.add_measurement(
             sample.timestamp_s,
@@ -380,7 +511,7 @@ def live_dashboard():
 
         st.session_state.latest_sample = sample
 
-                # Create a measurement record.
+        # Create a measurement record.
         measurement = {
             "time_s": sample.timestamp_s,
             "voltage_v": sample.voltage_v,
@@ -411,56 +542,83 @@ def live_dashboard():
             st.session_state.running = False
             st.session_state.stopped = True
 
+    
     sample = st.session_state.latest_sample
-    integrator = st.session_state.integrator
 
-    if st.session_state.running:
-        st.success("● SIMULATION RUNNING")
+    if mode == "Arduino Mock Mode":
+        integrator = st.session_state.mock_bridge.processor
     else:
-        st.info("● SIMULATION PAUSED / NOT STARTED")
-    if st.session_state.log_path is not None:
-        st.caption(
-            "Automatic logging: "
-            f"{st.session_state.log_path.name}"
-        )
+        integrator = st.session_state.integrator
 
-    if st.session_state.log_error:
-        st.error(
-            "Logging error: "
-            f"{st.session_state.log_error}"
-        )
+
+    
+    if st.session_state.stopped:
+        st.warning("● EXPERIMENT STOPPED")
+
+    elif st.session_state.running:
+        if mode == "Arduino Mock Mode":
+            st.success("● ARDUINO MOCK RUNNING — SYNTHETIC DATA")
+        else:
+            st.success("● PYTHON SIMULATION RUNNING")
+
+    elif st.session_state.history:
+        st.info("● EXPERIMENT PAUSED")
+
+    else:
+        st.info("● READY TO START")
+
 
     if sample is None:
         st.info("No measurements yet. Press Start / Resume.")
         return
 
-    # --------------------------------------------------
-    # LIVE INSTRUMENTS
-    # --------------------------------------------------
+
+    # ---------------------------------------------
+    # LIVE ELECTRICAL MEASUREMENTS
+    # ---------------------------------------------
 
     st.subheader("Live Electrical Measurements")
 
+    # Labels depend on the selected measurement mode.
+    voltage_label = (
+        "Mock Bus Voltage"
+        if mode == "Arduino Mock Mode"
+        else "Voltage"
+    )
+
+    power_label = (
+        "Mock Bus Power"
+        if mode == "Arduino Mock Mode"
+        else "Power"
+    )
+
+    # Create four instrumentation columns.
     col1, col2, col3, col4 = st.columns(4)
 
+    # Voltage measurement
     col1.metric(
-        "Voltage",
+        voltage_label,
         f"{sample.voltage_v:.3f} V",
     )
 
+    # Current measurement
     col2.metric(
         "Current",
         f"{sample.current_a * 1000:.2f} mA",
     )
 
+    # Electrical power
     col3.metric(
-        "Power",
+        power_label,
         f"{sample.power_w:.3f} W",
     )
 
+    # Integrated electrical charge
     col4.metric(
         "Accumulated Charge",
         f"{integrator.total_charge_c:.4f} C",
     )
+
 
     st.divider()
 
@@ -474,7 +632,7 @@ def live_dashboard():
     )
 
     col2.metric(
-        "Simulation Time",
+        "Recording Time (s)",
         f"{sample.timestamp_s:.1f} s",
     )
     

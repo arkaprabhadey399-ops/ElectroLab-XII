@@ -8,7 +8,15 @@ from electrolab.arduino_processing import (
 )
 
 
-def make_event(seq, uptime_ms, current_ma=450.0, continuous=True):
+
+
+
+def make_event(
+    seq: int,
+    uptime_ms: int,
+    current_ma: float = 450.0,
+    continuous: bool = True,
+) -> SerialEvent:
     sample = ArduinoSample(
         sequence=seq,
         uptime_ms=uptime_ms,
@@ -22,6 +30,7 @@ def make_event(seq, uptime_ms, current_ma=450.0, continuous=True):
         sample=sample,
         continuous=continuous,
     )
+
 
 
 def test_charge_integration():
@@ -79,3 +88,33 @@ def test_pause_and_resume():
     assert processor.total_charge_c > before
 
 
+def test_timeout_breaks_charge_integration():
+    processor = ArduinoMeasurementProcessor()
+
+    processor.process(make_event(0, 500, 450.0, False))
+    processor.process(make_event(1, 1000, 450.0, True))
+
+    charge_before_timeout = processor.total_charge_c
+
+    # Simulate interrupted serial communication.
+    processor.process(
+        SerialEvent(
+            status="timeout",
+            message="No packet received.",
+        )
+    )
+
+    # The first reading after the timeout establishes
+    # a new baseline; it must not add charge.
+    result = processor.process(
+        make_event(2, 1500, 450.0, True)
+    )
+
+    assert result is not None
+
+    assert result.charge_c == pytest.approx(
+        charge_before_timeout
+    )
+
+    assert result.continuous is False
+    

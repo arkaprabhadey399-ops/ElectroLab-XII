@@ -92,3 +92,49 @@ def test_timeout_breaks_continuity():
 
     assert timeout.status == "timeout"
     assert resumed.continuous is False
+
+
+
+def test_recovery_after_timeout():
+    fake = FakeSerial([
+        b"",
+        mock_packet(0, 500),
+        mock_packet(1, 1000),
+    ])
+
+    reader = NanoSerialReader(connection=fake)
+
+    timeout = reader.read_event()
+    first = reader.read_event()
+    second = reader.read_event()
+
+    assert timeout.status == "timeout"
+
+    assert first.status == "sample"
+    assert first.continuous is False
+
+    assert second.status == "sample"
+    assert second.continuous is True
+
+
+
+def test_untrusted_packet_rejected():
+    packet = json.loads(
+        mock_packet(0, 500).decode("utf-8")
+    )
+
+    packet["simulated"] = False
+
+    fake = FakeSerial([
+        (json.dumps(packet) + "\n").encode("utf-8")
+    ])
+
+    reader = NanoSerialReader(connection=fake)
+    event = reader.read_event()
+
+    assert event.status == "invalid"
+
+
+
+
+
